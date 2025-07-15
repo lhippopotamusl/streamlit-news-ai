@@ -1,0 +1,13 @@
+# Python関係
+__pycache__/
+*.pyc
+
+# 環境設定（仮想環境やVSCodeなど）
+.vscode/
+.env/
+
+# Mac特有
+.DS_Store
+
+# ログファイル
+*.log
