@@ -1,67 +1,112 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import feedparser
-import urllib.parse
+import plotly.express as px
+import os
 
-# 銘柄リストと名称
+st.set_page_config(layout="wide")
+st.title("📈 株価チャート表示")
+
+# 🧪 開発モード切替
+dev_mode = st.sidebar.checkbox("🧪 開発モード（ローカルキャッシュ使用）", value=True)
+
+# 測定範囲
+range_option = st.selectbox("📅 測定範囲を選択してください", {
+    "5日": "5d",
+    "1週間": "7d",
+    "1か月": "1mo",
+    "3か月": "3mo",
+    "半年": "6mo",
+    "1年": "1y"
+})
+
+# 銘柄一覧
 stocks = {
-    "7735.T": "SCREEN HD",
+    "7735.T": "SCREENホールディングス",
     "8035.T": "東京エレクトロン",
-    "2134.T": "北浜キャピタルP",
+    "2134.T": "北浜キャピタルパートナーズ",
     "7888.T": "三光合成",
     "4368.T": "扶桑化学工業"
 }
+selected_code = st.selectbox("📌 銘柄を選択", list(stocks.keys()), format_func=lambda x: stocks[x])
 
-# 材料判定キーワード
-good_keywords = ["増益", "黒字", "上方修正", "提携", "買収", "新工場", "好調"]
-bad_keywords = ["減益", "赤字", "下方修正", "リコール", "不祥事", "訴訟", "値下げ"]
+# ✅ 本番モード：Streamlitのキャッシュ機能
+@st.cache_data(ttl=3600)
+def load_data_production(code: str, period: str) -> pd.DataFrame:
+    df = yf.download(code, period=period, interval="1d")
+    if not df.empty:
+        df.reset_index(inplace=True)
+    return df
 
-def classify_news(title):
-    if any(k in title for k in good_keywords):
-        return "好材料"
-    elif any(k in title for k in bad_keywords):
-        return "悪材料"
+# 🧪 開発モード：ローカルファイルを使ったキャッシュ
+def load_data_dev(code: str, period: str) -> pd.DataFrame:
+    filename = f"cache_{code}_{period}.csv"
+    if os.path.exists(filename):
+        df = pd.read_csv(filename, parse_dates=["Date"])
     else:
-        return "中立"
+        df = yf.download(code, period=period, interval="1d")
+        if not df.empty:
+            df.reset_index(inplace=True)
+            df.to_csv(filename, index=False)
+    return df
 
-def get_news(keyword, max_results=5):
-    encoded_keyword = urllib.parse.quote(keyword + " 株価")
-    url = f"https://news.google.com/rss/search?q={encoded_keyword}&hl=ja&gl=JP&ceid=JP:ja"
-    feed = feedparser.parse(url)
-    return [(entry.title, entry.published) for entry in feed.entries[:max_results]]
+# 切り替えによってロード方法を変更
+if dev_mode:
+    df = load_data_dev(selected_code, range_option)
+else:
+    df = load_data_production(selected_code, range_option)
 
-def get_stock_price_trend(code):
-    try:
-        df = yf.download(code, period="7d", progress=False)
-        return "📈 上昇傾向" if df["Close"][-1] > df["Close"][0] else "📉 下落傾向"
-    except:
-        return "—"
+# データが取れていない場合の処理
+if df.empty:
+    st.error("⚠️ データの取得に失敗しました。後ほど再試行してください。")
+else:
+    st.subheader(f"📊 {stocks[selected_code]}（{range_option}）の株価チャート")
+    fig = px.line(df, x="Date", y="Close", title=f"{stocks[selected_code]} 株価推移")
+    st.plotly_chart(fig, use_container_width=True)
 
-st.title("株ニュース自動仕分け＆銘柄絞り込み")
 
-selected_code = st.selectbox("銘柄を選択してください", list(stocks.keys()), format_func=lambda x: stocks[x])
+#ニュースの取得
+import feedparser
+from datetime import datetime
+import hashlib
 
-if st.button("ニュース取得・判定開始"):
-    trend = get_stock_price_trend(selected_code)
-    news_list = get_news(stocks[selected_code])
+def get_company_name_from_code(code):
+    return stocks.get(code, code)
 
-    results = []
-    for title, date in news_list:
-        label = classify_news(title)
-        results.append({"日付": date, "ニュース見出し": title, "材料判定": label})
+def news_cache_filename(company_name):
+    hash_name = hashlib.md5(company_name.encode()).hexdigest()
+    return f"news_{hash_name}.csv"
 
-    df = pd.DataFrame(results)
-    df["日付"] = pd.to_datetime(df["日付"], format="mixed")
-    df = df.sort_values("日付", ascending=False).reset_index(drop=True)
+def fetch_and_cache_news(company_name, max_items=10):
+    rss_url = f"https://news.google.com/rss/search?q={company_name}+株価&hl=ja&gl=JP&ceid=JP:ja"
+    feed = feedparser.parse(rss_url)
+    items = []
+    for entry in feed.entries[:max_items]:
+        published = entry.get("published", "")[:16]  # 日付だけ
+        items.append({
+            "title": entry.title,
+            "link": entry.link,
+            "published": published
+        })
+    df = pd.DataFrame(items)
+    df.to_csv(news_cache_filename(company_name), index=False)
+    return df
 
-    st.write(f"### {stocks[selected_code]} の株価傾向: {trend}")
-    st.markdown("#### ニュース一覧（折り返し表示）")
+def load_news(company_name):
+    cache_file = news_cache_filename(company_name)
+    if os.path.exists(cache_file):
+        df = pd.read_csv(cache_file)
+    else:
+        df = fetch_and_cache_news(company_name)
+    return df
 
-    st.markdown(
-        df.style.set_table_styles([
-            {'selector': 'th', 'props': [('text-align', 'left')]},
-            {'selector': 'td', 'props': [('text-align', 'left'), ('white-space', 'normal')]}
-        ]).hide(axis='index').to_html(escape=False),
-        unsafe_allow_html=True
-    )
+# 🚀 ニュース取得＋表示
+company_name = get_company_name_from_code(selected_code)
+news_df = load_news(company_name)
+
+st.subheader(f"📰 {company_name} に関する最新ニュース")
+if news_df.empty:
+    st.write("ニュースが見つかりませんでした。")
+else:
+    for _, row in news_df.iterrows():
+        st.markdown(f"- [{row['published']} 📅] [{row['title']}]({row['link']})")
